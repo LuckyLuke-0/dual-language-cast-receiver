@@ -7,9 +7,13 @@ body {
   background: #000;
 }
 
-cast-media-player {
-  --splash-image: none;
-  --background-color: #000;
+#media {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  background: #000;
+  object-fit: contain;
 }
 
 #subtitle {
