@@ -5,6 +5,9 @@
   const playerManager = context.getPlayerManager();
   const video = document.getElementById('media');
   playerManager.setMediaElement(video);
+  const playbackConfig = new cast.framework.PlaybackConfig();
+  playbackConfig.enableUITextDisplayer = true;
+  playerManager.setPlaybackConfig(playbackConfig);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
   const audio = document.createElement('audio');
@@ -205,7 +208,7 @@
       video.muted = true;
       applySubtitleStyle(custom.subtitleStyle || {});
       configureAudio(custom.audioUrl);
-      configureSubtitles(custom.subtitleUrl);
+      clearSubtitles(); // Ondertitels worden als officiële Cast-teksttrack geladen.
 
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = setInterval(() => {
