@@ -5,9 +5,6 @@
   const playerManager = context.getPlayerManager();
   const video = document.getElementById('media');
   playerManager.setMediaElement(video);
-  const playbackConfig = new cast.framework.PlaybackConfig();
-  playbackConfig.enableUITextDisplayer = true;
-  playerManager.setPlaybackConfig(playbackConfig);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
   const audio = document.createElement('audio');
