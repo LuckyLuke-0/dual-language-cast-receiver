@@ -14,6 +14,7 @@
   document.body.appendChild(audio);
 
   let trackElement = null;
+  let subtitleCues = [];
   let syncTimer = null;
   let pendingStartTime = 0;
 
@@ -64,6 +65,7 @@
   }
 
   function clearSubtitles() {
+    subtitleCues = [];
     subtitle.textContent = '';
     subtitle.style.display = 'none';
     if (trackElement) {
@@ -72,26 +74,67 @@
     }
   }
 
-  function configureSubtitles(url) {
+  function parseTimestamp(value) {
+    const parts = value.trim().replace(',', '.').split(':').map(Number);
+    if (parts.some(part => !Number.isFinite(part))) return NaN;
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    return NaN;
+  }
+
+  function parseVtt(vtt) {
+    const blocks = vtt
+      .replace(/^\uFEFF/, '')
+      .replace(/\r/g, '')
+      .split(/\n{2,}/);
+
+    return blocks.flatMap(block => {
+      const lines = block.split('\n').filter(Boolean);
+      const timingIndex = lines.findIndex(line => line.includes('-->'));
+      if (timingIndex < 0 || /^NOTE(?:\s|$)/.test(lines[0] || '')) return [];
+
+      const timing = lines[timingIndex].split('-->');
+      const start = parseTimestamp(timing[0]);
+      const end = parseTimestamp((timing[1] || '').trim().split(/\s+/)[0]);
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+
+      const text = lines
+        .slice(timingIndex + 1)
+        .join('\n')
+        .replace(/<[^>]*>/g, '')
+        .replace(/&nbsp;/g, ' ')
+        .replace(/&amp;/g, '&')
+        .replace(/&lt;/g, '<')
+        .replace(/&gt;/g, '>');
+
+      return text ? [{ start, end, text }] : [];
+    });
+  }
+
+  function updateSubtitleFromTime() {
+    if (!subtitleCues.length) return;
+    const now = video.currentTime;
+    const active = subtitleCues.filter(cue => now >= cue.start && now < cue.end);
+    subtitle.textContent = active.map(cue => cue.text).join('\n');
+    subtitle.style.display = active.length ? 'block' : 'none';
+  }
+
+  async function configureSubtitles(url) {
     clearSubtitles();
     if (!url) return;
 
-    trackElement = document.createElement('track');
-    trackElement.kind = 'subtitles';
-    trackElement.label = 'English';
-    trackElement.srclang = 'en';
-    trackElement.src = url;
-    const updateSubtitle = () => {
-      const cues = Array.from(trackElement?.track.activeCues || []);
-      subtitle.textContent = cues.map(cue => cue.text).join('\n');
-      subtitle.style.display = cues.length ? 'block' : 'none';
-    };
-
-    trackElement.track.addEventListener('cuechange', updateSubtitle);
-    video.appendChild(trackElement);
-    // A disabled text track is not guaranteed to load. Hidden loads cues
-    // without letting the browser draw its own subtitle layer.
-    trackElement.track.mode = 'hidden';
+    try {
+      const response = await fetch(url, { mode: 'cors', cache: 'no-store' });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      subtitleCues = parseVtt(await response.text());
+      if (!subtitleCues.length) throw new Error('Geen geldige VTT-regels gevonden');
+      updateSubtitleFromTime();
+    } catch (error) {
+      status.textContent =
+        `Ondertiteling kon niet worden geladen: ${error.message || error}`;
+      status.style.display = 'block';
+      console.error('Subtitle loading failed', error);
+    }
   }
 
   function hardSync() {
@@ -127,6 +170,8 @@
   });
   video.addEventListener('pause', () => audio.pause());
   video.addEventListener('seeking', hardSync);
+  video.addEventListener('timeupdate', updateSubtitleFromTime);
+  video.addEventListener('seeked', updateSubtitleFromTime);
   video.addEventListener('seeked', hardSync);
   video.addEventListener('ratechange', () => {
     audio.playbackRate = video.playbackRate;
