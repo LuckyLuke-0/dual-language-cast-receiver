@@ -1,0 +1,52 @@
+html,
+body {
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  overflow: hidden;
+  background: #000;
+}
+
+cast-media-player {
+  --splash-image: none;
+  --background-color: #000;
+}
+
+#subtitle {
+  position: fixed;
+  left: 5%;
+  right: 5%;
+  bottom: var(--subtitle-bottom, 4%);
+  z-index: 10;
+  display: none;
+  margin: auto;
+  width: fit-content;
+  max-width: 90%;
+  box-sizing: border-box;
+  padding: var(--subtitle-padding-y, 0) var(--subtitle-padding-x, 0);
+  color: var(--subtitle-color, #fff);
+  background: var(--subtitle-background, transparent);
+  border-radius: 0.18em;
+  font-family: var(--subtitle-font, Arial, sans-serif);
+  font-size: clamp(22px, calc(var(--subtitle-size, 60) * 0.075vw), 64px);
+  font-weight: var(--subtitle-weight, 600);
+  line-height: 1.22;
+  letter-spacing: var(--subtitle-spacing, 0);
+  text-align: center;
+  white-space: pre-line;
+  text-shadow: var(--subtitle-shadow, none);
+}
+
+#status {
+  position: fixed;
+  inset: auto 0 8% 0;
+  z-index: 2;
+  color: rgba(255, 255, 255, 0.72);
+  font: 500 28px Arial, sans-serif;
+  text-align: center;
+  pointer-events: none;
+}
+
+body.playing #status {
+  display: none;
+}
