@@ -3,7 +3,8 @@
 
   const context = cast.framework.CastReceiverContext.getInstance();
   const playerManager = context.getPlayerManager();
-  const video = playerManager.getMediaElement();
+  const video = document.getElementById('media');
+  playerManager.setMediaElement(video);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
   const audio = document.createElement('audio');
