@@ -81,16 +81,17 @@
     trackElement.label = 'English';
     trackElement.srclang = 'en';
     trackElement.src = url;
-    video.appendChild(trackElement);
+    const updateSubtitle = () => {
+      const cues = Array.from(trackElement?.track.activeCues || []);
+      subtitle.textContent = cues.map(cue => cue.text).join('\n');
+      subtitle.style.display = cues.length ? 'block' : 'none';
+    };
 
-    trackElement.addEventListener('load', () => {
-      trackElement.track.mode = 'hidden';
-      trackElement.track.addEventListener('cuechange', () => {
-        const cues = Array.from(trackElement.track.activeCues || []);
-        subtitle.textContent = cues.map(cue => cue.text).join('\n');
-        subtitle.style.display = cues.length ? 'block' : 'none';
-      });
-    });
+    trackElement.track.addEventListener('cuechange', updateSubtitle);
+    video.appendChild(trackElement);
+    // A disabled text track is not guaranteed to load. Hidden loads cues
+    // without letting the browser draw its own subtitle layer.
+    trackElement.track.mode = 'hidden';
   }
 
   function hardSync() {
