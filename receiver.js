@@ -205,7 +205,7 @@
       video.muted = true;
       applySubtitleStyle(custom.subtitleStyle || {});
       configureAudio(custom.audioUrl);
-      clearSubtitles(); // Ondertitels worden als officiële Cast-teksttrack geladen.
+      configureSubtitles(custom.subtitleUrl || '');
 
       if (syncTimer) clearInterval(syncTimer);
       syncTimer = setInterval(() => {
@@ -225,7 +225,7 @@
   );
 
   context.start({
-    disableIdleTimeout: true,
+    disableIdleTimeout: false,
     supportedCommands:
       cast.framework.messages.Command.PAUSE |
       cast.framework.messages.Command.SEEK |
