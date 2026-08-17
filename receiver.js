@@ -7,10 +7,25 @@
   playerManager.setMediaElement(video);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
-  const audio = document.createElement('audio');
+  // The alternate-language source is a complete MP4 (video + audio), not an
+  // audio-only file. Some Cast implementations reject that source in an
+  // <audio> element. A visually hidden <video> keeps the MP4 container
+  // compatible while only its sound is used.
+  const audio = document.createElement('video');
 
+  audio.id = 'alternate-audio-source';
   audio.preload = 'auto';
   audio.crossOrigin = 'anonymous';
+  audio.playsInline = true;
+  audio.muted = false;
+  audio.volume = 1;
+  audio.style.position = 'fixed';
+  audio.style.width = '1px';
+  audio.style.height = '1px';
+  audio.style.left = '-10px';
+  audio.style.top = '-10px';
+  audio.style.opacity = '0';
+  audio.style.pointerEvents = 'none';
   document.body.appendChild(audio);
 
   let trackElement = null;
@@ -148,7 +163,9 @@
     try {
       await audio.play();
     } catch (error) {
-      status.textContent = 'Engelse audio kon niet worden gestart';
+      document.body.classList.remove('playing');
+      status.textContent = 'De gekozen audiotrack kon niet worden gestart';
+      status.style.display = 'block';
       console.error('Secondary audio playback failed', error);
     }
   }
@@ -159,6 +176,8 @@
     audio.load();
     if (!url) return;
     audio.src = url;
+    audio.muted = false;
+    audio.volume = 1;
     audio.currentTime = pendingStartTime;
     audio.load();
   }
