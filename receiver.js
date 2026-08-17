@@ -121,27 +121,17 @@
 
   async function configureSubtitles(url) {
     clearSubtitles();
-    status.style.display = 'block';
-    if (!url) {
-      status.textContent = 'Diagnose ondertiteling: geen ondertitel-URL ontvangen';
-      return;
-    }
-    status.textContent = 'Diagnose ondertiteling: URL ontvangen, bestand laden…';
+    status.style.display = 'none';
+    if (!url) return;
 
     try {
       const response = await fetch(url, { mode: 'cors', cache: 'no-store' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
       subtitleCues = parseVtt(await response.text());
       if (!subtitleCues.length) throw new Error('Geen geldige VTT-regels gevonden');
-      const first = subtitleCues[0];
-      status.textContent =
-        `Diagnose ondertiteling: ${subtitleCues.length} regels geladen · eerste ${first.start.toFixed(2)}s · video ${video.currentTime.toFixed(2)}s`;
-      status.style.display = 'block';
       updateSubtitleFromTime();
     } catch (error) {
-      status.textContent =
-        `Ondertiteling kon niet worden geladen: ${error.message || error}`;
-      status.style.display = 'block';
+      status.style.display = 'none';
       console.error('Subtitle loading failed', error);
     }
   }
