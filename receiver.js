@@ -7,11 +7,10 @@
   playerManager.setMediaElement(video);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
-  // The alternate-language source is a complete MP4 (video + audio), not an
-  // audio-only file. Some Cast implementations reject that source in an
-  // <audio> element. A visually hidden <video> keeps the MP4 container
-  // compatible while only its sound is used.
-  const audio = document.createElement('video');
+  // Decode only the audio track from the alternate MP4. Using a second video
+  // element can exhaust the single hardware video decoder on some TVs and
+  // makes the Cast receiver terminate with a generic playback error.
+  const audio = document.createElement('audio');
 
   audio.id = 'alternate-audio-source';
   audio.preload = 'auto';
@@ -195,6 +194,15 @@
     audio.playbackRate = video.playbackRate;
   });
   video.addEventListener('ended', () => audio.pause());
+  video.addEventListener('error', () => {
+    const code = video.error?.code || 0;
+    status.textContent = `De videobron kon niet worden afgespeeld (code ${code})`;
+    status.style.display = 'block';
+    console.error('Primary video playback failed', video.error);
+  });
+  audio.addEventListener('error', () => {
+    console.error('Alternate audio source failed', audio.error);
+  });
   video.addEventListener('volumechange', () => {
     video.muted = true;
   });
@@ -206,14 +214,15 @@
       pendingStartTime = number(loadRequest.currentTime, 0);
 
       if (!custom.audioUrl) {
-        throw new Error('audioUrl ontbreekt in de Cast-aanvraag');
+        status.textContent = 'De gekozen video bevat geen bruikbare audiobron';
+        status.style.display = 'block';
       }
 
       document.body.classList.remove('playing');
       status.textContent = 'Video voorbereiden…';
       video.muted = true;
       applySubtitleStyle(custom.subtitleStyle || {});
-      configureAudio(custom.audioUrl);
+      configureAudio(custom.audioUrl || '');
       configureSubtitles(custom.subtitleUrl || '');
 
       if (syncTimer) clearInterval(syncTimer);
