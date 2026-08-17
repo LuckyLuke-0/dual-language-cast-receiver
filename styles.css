@@ -32,7 +32,7 @@ body {
   background: var(--subtitle-background, transparent);
   border-radius: 0.18em;
   font-family: var(--subtitle-font, Arial, sans-serif);
-  font-size: clamp(22px, calc(var(--subtitle-size, 60) * 0.075vw), 64px);
+  font-size: clamp(22px, calc(var(--subtitle-size, 60) * 0.055vw), 90px);
   font-weight: var(--subtitle-weight, 600);
   line-height: 1.22;
   letter-spacing: var(--subtitle-spacing, 0);
