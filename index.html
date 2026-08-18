@@ -4,15 +4,15 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LingoMix—Video Subtitle Player</title>
-  <link rel="stylesheet" href="styles.css?v=20260818-11">
+  <link rel="stylesheet" href="styles.css?v=20260818-12">
 </head>
 <body>
-  <video id="media" playsinline crossorigin="anonymous"></video>
+  <video id="media" class="castMediaElement" playsinline crossorigin="anonymous"></video>
+  <audio id="companion-audio" playsinline crossorigin="anonymous" preload="auto" hidden></audio>
   <div id="subtitle" aria-live="off"></div>
-  <div id="status">LingoMix receiver v11 gereed</div>
+  <div id="status">LingoMix receiver v12 gereed</div>
 
   <script src="//www.gstatic.com/cast/sdk/libs/caf_receiver/v3/cast_receiver_framework.js"></script>
-  <script src="mp4box.all.min.js?v=0.5.4"></script>
-  <script src="receiver.js?v=20260818-11"></script>
+  <script src="receiver.js?v=20260818-12"></script>
 </body>
 </html>
