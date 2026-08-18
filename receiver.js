@@ -56,25 +56,12 @@
     subtitle.style.setProperty('--subtitle-size', String(size));
     subtitle.style.setProperty('--subtitle-bottom', `${bottom}%`);
     subtitle.style.setProperty('--subtitle-color', style.textColor || '#ffffff');
-    subtitle.style.setProperty(
-      '--subtitle-font',
-      font === 'verdana' ? 'Verdana, Geneva, sans-serif' : 'Arial, Helvetica, sans-serif'
-    );
+    subtitle.style.setProperty('--subtitle-font', font === 'verdana' ? 'Verdana, Geneva, sans-serif' : 'Arial, Helvetica, sans-serif');
     subtitle.style.setProperty('--subtitle-spacing', font === 'verdana' ? '0.01em' : '0');
-    subtitle.style.setProperty(
-      '--subtitle-background',
-      backgroundOpacity > 0
-        ? colourWithAlpha(style.backgroundColor || '#000000', backgroundOpacity)
-        : 'transparent'
-    );
+    subtitle.style.setProperty('--subtitle-background', backgroundOpacity > 0 ? colourWithAlpha(style.backgroundColor || '#000000', backgroundOpacity) : 'transparent');
     subtitle.style.setProperty('--subtitle-padding-y', backgroundOpacity > 0 ? '0.12em' : '0');
     subtitle.style.setProperty('--subtitle-padding-x', backgroundOpacity > 0 ? '0.28em' : '0');
-    subtitle.style.setProperty(
-      '--subtitle-shadow',
-      outline
-        ? '-0.055em -0.055em 0 #000, 0.055em -0.055em 0 #000, -0.055em 0.055em 0 #000, 0.055em 0.055em 0 #000, 0 0 0.08em #000'
-        : 'none'
-    );
+    subtitle.style.setProperty('--subtitle-shadow', outline ? '-0.055em -0.055em 0 #000, 0.055em -0.055em 0 #000, -0.055em 0.055em 0 #000, 0.055em 0.055em 0 #000, 0 0 0.08em #000' : 'none');
   }
 
   function clearSubtitles() {
@@ -92,30 +79,16 @@
   }
 
   function parseVtt(vtt) {
-    const blocks = vtt
-      .replace(/^\uFEFF/, '')
-      .replace(/\r/g, '')
-      .split(/\n{2,}/);
-
+    const blocks = vtt.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n{2,}/);
     return blocks.reduce((cues, block) => {
       const lines = block.split('\n').filter(Boolean);
       const timingIndex = lines.findIndex(line => line.includes('-->'));
       if (timingIndex < 0 || /^NOTE(?:\s|$)/.test(lines[0] || '')) return cues;
-
       const timing = lines[timingIndex].split('-->');
       const start = parseTimestamp(timing[0]);
       const end = parseTimestamp((timing[1] || '').trim().split(/\s+/)[0]);
       if (!Number.isFinite(start) || !Number.isFinite(end)) return cues;
-
-      const text = lines
-        .slice(timingIndex + 1)
-        .join('\n')
-        .replace(/<[^>]*>/g, '')
-        .replace(/&nbsp;/g, ' ')
-        .replace(/&amp;/g, '&')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>');
-
+      const text = lines.slice(timingIndex + 1).join('\n').replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
       if (text) cues.push({ start, end, text });
       return cues;
     }, []);
@@ -132,7 +105,6 @@
   async function configureSubtitles(url, generation) {
     clearSubtitles();
     if (!url) return;
-
     try {
       const response = await fetch(url, { mode: 'cors', cache: 'no-store' });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
@@ -156,9 +128,7 @@
     stopSyncTimer();
     useCompanionAudio = false;
     audioUrl = '';
-    try {
-      audio.pause();
-    } catch (_) {}
+    try { audio.pause(); } catch (_) {}
     audio.removeAttribute('src');
     audio.load();
     video.muted = false;
@@ -167,12 +137,7 @@
   function safeSetAudioTime(target) {
     if (!useCompanionAudio || !Number.isFinite(target) || audio.readyState < 1) return;
     const duration = Number.isFinite(audio.duration) ? audio.duration : Number.POSITIVE_INFINITY;
-    const clamped = Math.max(0, Math.min(target, duration));
-    try {
-      audio.currentTime = clamped;
-    } catch (error) {
-      console.warn('Could not seek companion audio', error);
-    }
+    try { audio.currentTime = Math.max(0, Math.min(target, duration)); } catch (error) { console.warn(error); }
   }
 
   function synchronizeAudio(force = false) {
@@ -183,8 +148,6 @@
       audio.playbackRate = video.playbackRate || 1;
       return;
     }
-
-    // For small drift, gently converge without audible seek jumps.
     if (Math.abs(drift) > SOFT_SYNC_DRIFT_SECONDS) {
       const correction = drift > 0 ? -0.02 : 0.02;
       audio.playbackRate = Math.max(0.5, Math.min(2, (video.playbackRate || 1) + correction));
@@ -214,13 +177,7 @@
     resetCompanionAudio();
     const chosen = String(nextAudioUrl || '').trim();
     const picture = String(videoUrl || '').trim();
-
-    // If picture and sound come from the same MP4, use normal CAF playback.
-    if (!chosen || chosen === picture) {
-      video.muted = false;
-      return;
-    }
-
+    if (!chosen || chosen === picture) return;
     audioUrl = chosen;
     useCompanionAudio = true;
     video.muted = true;
@@ -230,91 +187,77 @@
     audio.load();
   }
 
-  playerManager.setMessageInterceptor(
-    cast.framework.messages.MessageType.LOAD,
-    request => {
-      loadGeneration += 1;
-      const generation = loadGeneration;
-      const media = request && request.media ? request.media : {};
-      const customData = media.customData || {};
-      const videoUrl = media.contentId || media.contentUrl || '';
-
-      showStatus('Video en gekozen audio worden gestart…');
-      applySubtitleStyle(customData.subtitleStyle || {});
-      configureSubtitles(customData.subtitleUrl || '', generation);
-      configureCompanionAudio(customData.audioUrl || '', videoUrl);
-
-      return request;
+  function describeUrl(url) {
+    try {
+      const parsed = new URL(url);
+      return `${parsed.protocol}//${parsed.hostname}:${parsed.port || '(default)'}`;
+    } catch (_) {
+      return String(url || 'ongeldig adres');
     }
-  );
+  }
 
-  video.addEventListener('loadedmetadata', () => {
-    if (useCompanionAudio) synchronizeAudio(true);
+  async function probeSinglePipeline(url) {
+    showStatus(`Receiver v13: lokale media testen…\n${describeUrl(url)}`);
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 8000);
+    try {
+      const response = await fetch(url, {
+        method: 'HEAD',
+        mode: 'cors',
+        cache: 'no-store',
+        signal: controller.signal
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText || ''}`.trim());
+      const length = response.headers.get('content-length') || '?';
+      const type = response.headers.get('content-type') || '?';
+      showStatus(`Receiver v13: telefoon bereikbaar ✓\nHEAD ${response.status} · ${type} · ${length} bytes\nMedia wordt gestart…`);
+      return true;
+    } catch (error) {
+      const reason = error && error.name === 'AbortError' ? 'timeout na 8 s' : `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : String(error)}`;
+      showStatus(`Receiver v13: lokale media NIET bereikbaar\n${describeUrl(url)}\n${reason}`);
+      console.error('Single-pipeline local media probe failed', error, url);
+      return false;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }
+
+  playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, async request => {
+    loadGeneration += 1;
+    const generation = loadGeneration;
+    const media = request && request.media ? request.media : {};
+    const customData = media.customData || {};
+    const videoUrl = media.contentId || media.contentUrl || '';
+
+    showStatus('Video en gekozen audio worden gestart…');
+    applySubtitleStyle(customData.subtitleStyle || {});
+    configureSubtitles(customData.subtitleUrl || '', generation);
+    configureCompanionAudio(customData.audioUrl || '', videoUrl);
+
+    if (customData.singlePipeline === true && /^http:\/\//i.test(videoUrl)) {
+      const reachable = await probeSinglePipeline(videoUrl);
+      if (!reachable) {
+        throw new Error('LOCAL_MEDIA_UNREACHABLE');
+      }
+    }
+    return request;
   });
 
-  video.addEventListener('playing', () => {
-    hideStatus();
-    if (useCompanionAudio) playCompanionAudio();
-  });
-
-  video.addEventListener('play', () => {
-    if (useCompanionAudio) playCompanionAudio();
-  });
-
-  video.addEventListener('pause', () => {
-    stopSyncTimer();
-    if (useCompanionAudio) audio.pause();
-  });
-
-  video.addEventListener('seeking', () => {
-    if (!useCompanionAudio) return;
-    audio.pause();
-    synchronizeAudio(true);
-  });
-
-  video.addEventListener('seeked', () => {
-    if (!useCompanionAudio) return;
-    synchronizeAudio(true);
-    if (!video.paused && !video.ended) playCompanionAudio();
-  });
-
-  video.addEventListener('ratechange', () => {
-    if (useCompanionAudio) audio.playbackRate = video.playbackRate || 1;
-  });
-
+  video.addEventListener('loadedmetadata', () => { if (useCompanionAudio) synchronizeAudio(true); });
+  video.addEventListener('playing', () => { hideStatus(); if (useCompanionAudio) playCompanionAudio(); });
+  video.addEventListener('play', () => { if (useCompanionAudio) playCompanionAudio(); });
+  video.addEventListener('pause', () => { stopSyncTimer(); if (useCompanionAudio) audio.pause(); });
+  video.addEventListener('seeking', () => { if (!useCompanionAudio) return; audio.pause(); synchronizeAudio(true); });
+  video.addEventListener('seeked', () => { if (!useCompanionAudio) return; synchronizeAudio(true); if (!video.paused && !video.ended) playCompanionAudio(); });
+  video.addEventListener('ratechange', () => { if (useCompanionAudio) audio.playbackRate = video.playbackRate || 1; });
   video.addEventListener('timeupdate', updateSubtitleFromTime);
-
-  video.addEventListener('ended', () => {
-    stopSyncTimer();
-    if (useCompanionAudio) audio.pause();
-  });
-
+  video.addEventListener('ended', () => { stopSyncTimer(); if (useCompanionAudio) audio.pause(); });
   video.addEventListener('error', () => {
     const code = video.error ? video.error.code : 'onbekend';
-    console.error('CAF video element failed', video.error);
     showStatus(`De video kon niet worden afgespeeld (fout ${code})`);
   });
-
-  audio.addEventListener('loadedmetadata', () => {
-    if (!useCompanionAudio) return;
-    synchronizeAudio(true);
-    if (!video.paused && !video.ended) playCompanionAudio();
-  });
-
-  audio.addEventListener('error', () => {
-    if (!useCompanionAudio) return;
-    const code = audio.error ? audio.error.code : 'onbekend';
-    console.error('Companion audio element failed', audio.error);
-    showStatus(`De gekozen audio kon niet worden afgespeeld (fout ${code})`);
-  });
-
-  audio.addEventListener('stalled', () => {
-    console.warn('Companion audio stalled');
-  });
-
-  audio.addEventListener('waiting', () => {
-    console.warn('Companion audio waiting for data');
-  });
+  audio.addEventListener('loadedmetadata', () => { if (!useCompanionAudio) return; synchronizeAudio(true); if (!video.paused && !video.ended) playCompanionAudio(); });
+  audio.addEventListener('error', () => { if (!useCompanionAudio) return; const code = audio.error ? audio.error.code : 'onbekend'; showStatus(`De gekozen audio kon niet worden afgespeeld (fout ${code})`); });
 
   context.addEventListener(cast.framework.system.EventType.SHUTDOWN, () => {
     loadGeneration += 1;
