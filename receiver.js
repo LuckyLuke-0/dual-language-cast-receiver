@@ -7,44 +7,18 @@
   playerManager.setMediaElement(video);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
-  // Decode only the audio track from the alternate MP4. Using a second video
-  // element can exhaust the single hardware video decoder on some TVs and
-  // makes the Cast receiver terminate with a generic playback error.
-  const audio = document.createElement('audio');
-
-  audio.id = 'alternate-audio-source';
-  audio.preload = 'auto';
-  audio.crossOrigin = 'anonymous';
-  audio.playsInline = true;
-  audio.muted = false;
-  audio.volume = 1;
-  audio.style.position = 'fixed';
-  audio.style.width = '1px';
-  audio.style.height = '1px';
-  audio.style.left = '-10px';
-  audio.style.top = '-10px';
-  audio.style.opacity = '0';
-  audio.style.pointerEvents = 'none';
-  document.body.appendChild(audio);
-
-  const AUDIO_CHUNK_SIZE = 1024 * 1024;
+  const CHUNK_SIZE = 1024 * 1024;
+  const VIDEO_SAMPLES_PER_SEGMENT = 125;
   const AUDIO_SAMPLES_PER_SEGMENT = 240;
 
   let trackElement = null;
   let subtitleCues = [];
-  let syncTimer = null;
-  let pendingStartTime = 0;
-  let currentAudioUrl = '';
-  let usingAlternateAudio = false;
-  let audioGeneration = 0;
-  let audioAbortController = null;
-  let audioMediaSource = null;
-  let audioObjectUrl = '';
-  let audioSourceBuffer = null;
-  let audioMp4BoxFile = null;
-  let audioTrackId = null;
-  let audioAppendQueue = [];
-  let audioEndRequested = false;
+  let pipelineGeneration = 0;
+  let pipelineAbortController = null;
+  let pipelineMediaSource = null;
+  let pipelineObjectUrl = '';
+  let pipelineTracks = [];
+  let pipelineFailed = false;
 
   const number = (value, fallback) => {
     const parsed = Number(value);
@@ -149,7 +123,6 @@
 
   async function configureSubtitles(url) {
     clearSubtitles();
-    status.style.display = 'none';
     if (!url) return;
 
     try {
@@ -159,102 +132,36 @@
       if (!subtitleCues.length) throw new Error('Geen geldige VTT-regels gevonden');
       updateSubtitleFromTime();
     } catch (error) {
-      status.style.display = 'none';
       console.error('Subtitle loading failed', error);
     }
   }
 
-  function isAudioBuffered(time) {
-    if (!Number.isFinite(time)) return false;
-    for (let i = 0; i < audio.buffered.length; i += 1) {
-      if (time >= audio.buffered.start(i) - 0.05 && time < audio.buffered.end(i) - 0.05) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  function hardSync() {
-    if (!usingAlternateAudio || !isAudioBuffered(video.currentTime)) return;
-    if (Math.abs(audio.currentTime - video.currentTime) > 0.22) {
+  function stopCombinedPipeline() {
+    pipelineGeneration += 1;
+    pipelineAbortController?.abort();
+    pipelineAbortController = null;
+    pipelineTracks.forEach(state => {
       try {
-        audio.currentTime = video.currentTime;
+        state.file?.stop();
       } catch (error) {
-        console.warn('Alternate audio seek is not ready yet', error);
+        console.warn('Could not stop MP4 parser', error);
       }
-    }
+    });
+    pipelineTracks = [];
+    if (pipelineObjectUrl) URL.revokeObjectURL(pipelineObjectUrl);
+    pipelineObjectUrl = '';
+    pipelineMediaSource = null;
+    pipelineFailed = false;
   }
 
-  async function playAudioWhenReady() {
-    if (!usingAlternateAudio || video.paused || !isAudioBuffered(video.currentTime)) return;
-    hardSync();
-    audio.playbackRate = video.playbackRate;
-    try {
-      await audio.play();
-    } catch (error) {
-      console.warn('Alternate audio is not ready to play yet', error);
-    }
-  }
-
-  function stopAudioPipeline() {
-    audioGeneration += 1;
-    audioAbortController?.abort();
-    audioAbortController = null;
-    try {
-      audioMp4BoxFile?.stop();
-    } catch (error) {
-      console.warn('Could not stop MP4 audio parser', error);
-    }
-    audio.pause();
-    audio.removeAttribute('src');
-    audio.load();
-    if (audioObjectUrl) URL.revokeObjectURL(audioObjectUrl);
-    audioObjectUrl = '';
-    audioMediaSource = null;
-    audioSourceBuffer = null;
-    audioMp4BoxFile = null;
-    audioTrackId = null;
-    audioAppendQueue = [];
-    audioEndRequested = false;
-  }
-
-  function usePrimaryAudioFallback(message, error) {
-    if (error?.name === 'AbortError') return;
+  function failCombinedPipeline(message, error, generation) {
+    if (generation !== pipelineGeneration || pipelineFailed) return;
+    pipelineFailed = true;
     console.error(message, error);
-    usingAlternateAudio = false;
-    stopAudioPipeline();
-    video.muted = false;
     document.body.classList.remove('playing');
-    status.textContent = message + '. De oorspronkelijke audio wordt gebruikt.';
+    status.textContent = message;
     status.style.display = 'block';
-  }
-
-  function pumpAudioQueue(generation) {
-    if (generation !== audioGeneration || !audioSourceBuffer || audioSourceBuffer.updating) return;
-    if (audioAppendQueue.length) {
-      const item = audioAppendQueue.shift();
-      audioSourceBuffer.__sampleNumber = item.sampleNumber;
-      try {
-        audioSourceBuffer.appendBuffer(item.buffer);
-      } catch (error) {
-        usePrimaryAudioFallback('De gekozen audiotrack kon niet worden verwerkt', error);
-      }
-      return;
-    }
-    if (audioEndRequested && audioMediaSource?.readyState === 'open') {
-      try {
-        audioMediaSource.endOfStream();
-      } catch (error) {
-        console.warn('Could not close alternate audio stream', error);
-      }
-    }
-  }
-
-  function queueAudioBuffer(buffer, sampleNumber, last, generation) {
-    if (generation !== audioGeneration) return;
-    audioAppendQueue.push({ buffer, sampleNumber });
-    if (last) audioEndRequested = true;
-    pumpAudioQueue(generation);
+    pipelineAbortController?.abort();
   }
 
   function parseContentRange(value) {
@@ -266,214 +173,314 @@
     };
   }
 
-  async function downloadAndDemuxAudio(url, generation, file, controller) {
-    let nextStart = 0;
-    let totalLength = null;
+  function chooseTrack(info, kind) {
+    const candidates = kind === 'video'
+      ? (info.videoTracks || info.tracks?.filter(track => track.video))
+      : (info.audioTracks || info.tracks?.filter(track => track.audio));
 
-    while (generation === audioGeneration) {
-      const response = await fetch(url, {
-        mode: 'cors',
-        cache: 'no-store',
-        headers: { Range: 'bytes=' + nextStart + '-' + (nextStart + AUDIO_CHUNK_SIZE - 1) },
-        signal: controller.signal
-      });
-      if (!response.ok) throw new Error('Audio HTTP ' + response.status);
-      if (response.status === 200 && nextStart !== 0) {
-        throw new Error('Audio server stopped supporting byte ranges');
-      }
-
-      const contentRange = parseContentRange(response.headers.get('Content-Range'));
-      const responseStart = contentRange?.start ?? 0;
-      const buffer = await response.arrayBuffer();
-      if (generation !== audioGeneration) return;
-      if (!buffer.byteLength) throw new Error('Empty audio response');
-      buffer.fileStart = responseStart;
-
-      const suggestedNext = file.appendBuffer(buffer);
-      const responseEnd = responseStart + buffer.byteLength - 1;
-      totalLength = contentRange?.total ?? (response.status === 200 ? buffer.byteLength : totalLength);
-      const reachedEnd =
-        response.status === 200 ||
-        (totalLength !== null && responseEnd + 1 >= totalLength) ||
-        (response.status === 206 && buffer.byteLength < AUDIO_CHUNK_SIZE && totalLength === null);
-      if (reachedEnd) break;
-
-      nextStart =
-        Number.isFinite(suggestedNext) && suggestedNext > responseEnd
-          ? suggestedNext
-          : responseEnd + 1;
-    }
-
-    if (generation === audioGeneration) file.flush();
+    return (candidates || [])
+      .filter(track => {
+        const mime = kind + '/mp4; codecs="' + track.codec + '"';
+        return MediaSource.isTypeSupported(mime);
+      })
+      .sort((left, right) => {
+        if (kind !== 'video') return 0;
+        const leftSize = (left.video?.width || 0) * (left.video?.height || 0);
+        const rightSize = (right.video?.width || 0) * (right.video?.height || 0);
+        return rightSize - leftSize;
+      })[0] || null;
   }
 
-  function startAudioDemux(url, generation) {
-    const controller = new AbortController();
-    const file = window.MP4Box.createFile(true);
-    audioAbortController = controller;
-    audioMp4BoxFile = file;
+  async function fetchTrackChunk(state, generation) {
+    const requestedStart = state.nextStart;
+    const response = await fetch(state.url, {
+      mode: 'cors',
+      cache: 'no-store',
+      headers: { Range: 'bytes=' + requestedStart + '-' + (requestedStart + CHUNK_SIZE - 1) },
+      signal: pipelineAbortController.signal
+    });
+    if (!response.ok) throw new Error(state.kind + ' HTTP ' + response.status);
+    if (response.status === 200 && requestedStart !== 0) {
+      throw new Error(state.kind + ' source stopped supporting byte ranges');
+    }
 
-    file.onError = error => {
-      if (generation === audioGeneration) {
-        usePrimaryAudioFallback('De gekozen audiotrack kon niet worden gelezen', new Error(error));
-      }
+    const contentRange = parseContentRange(response.headers.get('Content-Range'));
+    const responseStart = contentRange?.start ?? 0;
+    const buffer = await response.arrayBuffer();
+    if (generation !== pipelineGeneration) return;
+    if (!buffer.byteLength) throw new Error('Empty ' + state.kind + ' response');
+    buffer.fileStart = responseStart;
+
+    const suggestedNext = state.file.appendBuffer(buffer);
+    const responseEnd = responseStart + buffer.byteLength - 1;
+    state.totalLength =
+      contentRange?.total ??
+      (response.status === 200 ? buffer.byteLength : state.totalLength);
+    state.eof =
+      response.status === 200 ||
+      (state.totalLength !== null && responseEnd + 1 >= state.totalLength) ||
+      (response.status === 206 && buffer.byteLength < CHUNK_SIZE && state.totalLength === null);
+    state.nextStart =
+      Number.isFinite(suggestedNext) && suggestedNext > responseEnd
+        ? suggestedNext
+        : responseEnd + 1;
+  }
+
+  async function prepareTrack(url, kind, generation) {
+    const state = {
+      url,
+      kind,
+      file: window.MP4Box.createFile(true),
+      track: null,
+      mime: '',
+      duration: 0,
+      initBuffer: null,
+      sourceBuffer: null,
+      queue: [],
+      nextStart: 0,
+      totalLength: null,
+      eof: false,
+      flushed: false,
+      error: null
     };
 
-    file.onReady = info => {
-      if (generation !== audioGeneration || audioSourceBuffer) return;
-      const track =
-        info.audioTracks?.[0] ||
-        info.tracks?.find(candidate => candidate.audio || candidate.type === 'audio');
-      if (!track) {
-        usePrimaryAudioFallback('De gekozen bron bevat geen audiotrack');
-        return;
-      }
-
-      const mime = 'audio/mp4; codecs="' + track.codec + '"';
-      if (!MediaSource.isTypeSupported(mime)) {
-        usePrimaryAudioFallback('Dit Cast-apparaat ondersteunt ' + track.codec + ' niet');
-        return;
-      }
-
+    state.file.onError = error => {
+      state.error = new Error(String(error));
+    };
+    state.file.onReady = info => {
+      if (state.track || state.error || generation !== pipelineGeneration) return;
       try {
-        audioTrackId = track.id;
-        audioSourceBuffer = audioMediaSource.addSourceBuffer(mime);
-        audioSourceBuffer.addEventListener('error', event => {
-          usePrimaryAudioFallback('De televisie kon de gekozen audiotrack niet decoderen', event);
-        });
-        audioSourceBuffer.addEventListener('updateend', () => {
-          const sampleNumber = audioSourceBuffer?.__sampleNumber;
-          if (sampleNumber && audioTrackId !== null) {
-            file.releaseUsedSamples(audioTrackId, sampleNumber);
-          }
-          pumpAudioQueue(generation);
-          playAudioWhenReady();
-        });
-
-        file.setSegmentOptions(track.id, null, {
-          nbSamples: AUDIO_SAMPLES_PER_SEGMENT,
-          rapAlignement: false,
+        const track = chooseTrack(info, kind);
+        if (!track) throw new Error('No supported ' + kind + ' track found');
+        state.track = track;
+        state.mime = kind + '/mp4; codecs="' + track.codec + '"';
+        state.duration =
+          Number.isFinite(info.duration) && Number.isFinite(info.timescale) && info.timescale > 0
+            ? info.duration / info.timescale
+            : 0;
+        state.file.setSegmentOptions(track.id, state, {
+          nbSamples:
+            kind === 'video' ? VIDEO_SAMPLES_PER_SEGMENT : AUDIO_SAMPLES_PER_SEGMENT,
+          rapAlignement: kind === 'video',
           normalizeAudioSampleEntriesForMSE: true
         });
-        const initSegments = file.initializeSegmentation('per-track');
-        const init = initSegments.find(segment => segment.id === track.id) || initSegments[0];
-        if (!init?.buffer) throw new Error('Audio initialization segment is missing');
-        if (Number.isFinite(info.duration) && Number.isFinite(info.timescale) && info.timescale > 0) {
-          audioMediaSource.duration = info.duration / info.timescale;
+        const initializations = state.file.initializeSegmentation('per-track');
+        const initialization =
+          initializations.find(item => item.id === track.id) || initializations[0];
+        if (!initialization?.buffer) {
+          throw new Error('No ' + kind + ' initialization segment was created');
         }
-        queueAudioBuffer(init.buffer, 0, false, generation);
-        file.start();
+        state.initBuffer = initialization.buffer;
       } catch (error) {
-        usePrimaryAudioFallback('De gekozen audiotrack kon niet worden voorbereid', error);
+        state.error = error;
       }
     };
 
-    file.onSegment = (id, user, buffer, sampleNumber, last) => {
-      if (id === audioTrackId) queueAudioBuffer(buffer, sampleNumber, Boolean(last), generation);
-    };
+    while (
+      generation === pipelineGeneration &&
+      !state.track &&
+      !state.error &&
+      !state.eof
+    ) {
+      await fetchTrackChunk(state, generation);
+    }
 
-    downloadAndDemuxAudio(url, generation, file, controller).catch(error => {
-      if (generation === audioGeneration) {
-        usePrimaryAudioFallback('De gekozen audiotrack kon niet worden geladen', error);
-      }
-    });
+    if (state.error) throw state.error;
+    if (!state.track) throw new Error('The ' + kind + ' metadata could not be read');
+    return state;
   }
 
-  function configureAudio(url) {
-    usingAlternateAudio = false;
-    stopAudioPipeline();
-    currentAudioUrl = url || '';
-    usingAlternateAudio = Boolean(currentAudioUrl);
-    if (!usingAlternateAudio) {
-      video.muted = false;
+  function maybeEndCombinedStream(generation) {
+    if (
+      generation !== pipelineGeneration ||
+      pipelineFailed ||
+      pipelineMediaSource?.readyState !== 'open' ||
+      !pipelineTracks.length
+    ) {
       return;
     }
-    if (!window.MP4Box || typeof MediaSource === 'undefined') {
-      usePrimaryAudioFallback('Dit Cast-apparaat ondersteunt geen gescheiden audiotracks');
+    const complete = pipelineTracks.every(state =>
+      state.flushed &&
+      state.queue.length === 0 &&
+      state.sourceBuffer &&
+      !state.sourceBuffer.updating
+    );
+    if (!complete) return;
+    try {
+      pipelineMediaSource.endOfStream();
+    } catch (error) {
+      console.warn('Could not close combined media stream', error);
+    }
+  }
+
+  function pumpTrackQueue(state, generation) {
+    if (
+      generation !== pipelineGeneration ||
+      pipelineFailed ||
+      !state.sourceBuffer ||
+      state.sourceBuffer.updating
+    ) {
+      return;
+    }
+    if (!state.queue.length) {
+      maybeEndCombinedStream(generation);
       return;
     }
 
-    const generation = audioGeneration;
-    audioMediaSource = new MediaSource();
-    audioObjectUrl = URL.createObjectURL(audioMediaSource);
-    audio.src = audioObjectUrl;
-    audio.muted = false;
-    audio.volume = 1;
-    audioMediaSource.addEventListener(
+    const item = state.queue.shift();
+    state.sourceBuffer.__sampleNumber = item.sampleNumber;
+    try {
+      state.sourceBuffer.appendBuffer(item.buffer);
+    } catch (error) {
+      failCombinedPipeline(
+        'De gecombineerde ' + state.kind + 'track kon niet worden verwerkt',
+        error,
+        generation
+      );
+    }
+  }
+
+  function queueTrackBuffer(state, buffer, sampleNumber, generation) {
+    if (generation !== pipelineGeneration || pipelineFailed) return;
+    state.queue.push({ buffer, sampleNumber });
+    pumpTrackQueue(state, generation);
+  }
+
+  function attachTrackSourceBuffer(state, generation) {
+    state.sourceBuffer = pipelineMediaSource.addSourceBuffer(state.mime);
+    state.sourceBuffer.addEventListener('error', event => {
+      failCombinedPipeline(
+        'De televisie kon de ' + state.kind + 'track niet decoderen',
+        event,
+        generation
+      );
+    });
+    state.sourceBuffer.addEventListener('updateend', () => {
+      const sampleNumber = state.sourceBuffer?.__sampleNumber;
+      if (sampleNumber && state.track) {
+        state.file.releaseUsedSamples(state.track.id, sampleNumber);
+      }
+      pumpTrackQueue(state, generation);
+    });
+    state.file.onSegment = (id, user, buffer, sampleNumber) => {
+      if (id === state.track.id) {
+        queueTrackBuffer(state, buffer, sampleNumber, generation);
+      }
+    };
+    queueTrackBuffer(state, state.initBuffer, 0, generation);
+    state.file.start();
+  }
+
+  async function finishTrackDownload(state, generation) {
+    while (
+      generation === pipelineGeneration &&
+      !pipelineFailed &&
+      !state.eof
+    ) {
+      await fetchTrackChunk(state, generation);
+    }
+    if (generation !== pipelineGeneration || pipelineFailed) return;
+    state.file.flush();
+    state.flushed = true;
+    maybeEndCombinedStream(generation);
+  }
+
+  async function startCombinedPipeline(videoUrl, audioUrl, generation) {
+    try {
+      pipelineAbortController = new AbortController();
+      const tracks = await Promise.all([
+        prepareTrack(videoUrl, 'video', generation),
+        prepareTrack(audioUrl, 'audio', generation)
+      ]);
+      if (generation !== pipelineGeneration) return;
+      pipelineTracks = tracks;
+
+      tracks.forEach(state => attachTrackSourceBuffer(state, generation));
+      const durations = tracks.map(state => state.duration).filter(value => value > 0);
+      if (durations.length) pipelineMediaSource.duration = Math.min(...durations);
+
+      await Promise.all(tracks.map(state => finishTrackDownload(state, generation)));
+    } catch (error) {
+      if (error?.name !== 'AbortError') {
+        failCombinedPipeline(
+          'Beeld en gekozen audio konden niet samen worden gestart',
+          error,
+          generation
+        );
+      }
+    }
+  }
+
+  function createCombinedMediaUrl(videoUrl, audioUrl) {
+    stopCombinedPipeline();
+    if (!window.MP4Box || typeof MediaSource === 'undefined') {
+      throw new Error('This Cast device does not support combined streaming');
+    }
+    const generation = pipelineGeneration;
+    pipelineMediaSource = new MediaSource();
+    pipelineObjectUrl = URL.createObjectURL(pipelineMediaSource);
+    pipelineMediaSource.addEventListener(
       'sourceopen',
-      () => startAudioDemux(currentAudioUrl, generation),
+      () => startCombinedPipeline(videoUrl, audioUrl, generation),
       { once: true }
     );
-    audio.load();
+    return pipelineObjectUrl;
   }
 
   video.addEventListener('play', () => {
     document.body.classList.add('playing');
-    playAudioWhenReady();
   });
-  video.addEventListener('pause', () => audio.pause());
   video.addEventListener('timeupdate', updateSubtitleFromTime);
   video.addEventListener('seeked', updateSubtitleFromTime);
-  video.addEventListener('seeked', () => {
-    hardSync();
-    playAudioWhenReady();
-  });
-  video.addEventListener('ratechange', () => {
-    audio.playbackRate = video.playbackRate;
-  });
-  video.addEventListener('ended', () => audio.pause());
   video.addEventListener('error', () => {
+    if (!pipelineObjectUrl || video.currentSrc !== pipelineObjectUrl) return;
     const code = video.error?.code || 0;
-    status.textContent = 'De videobron kon niet worden afgespeeld (code ' + code + ')';
-    status.style.display = 'block';
-    console.error('Primary video playback failed', video.error);
+    failCombinedPipeline(
+      'De gecombineerde videostream kon niet worden afgespeeld (code ' + code + ')',
+      video.error,
+      pipelineGeneration
+    );
   });
-  video.addEventListener('volumechange', () => {
-    if (usingAlternateAudio && !video.muted) video.muted = true;
-  });
-  audio.addEventListener('canplay', playAudioWhenReady);
-  audio.addEventListener('error', () => {
-    if (usingAlternateAudio) {
-      usePrimaryAudioFallback('De televisie kon de gekozen audiotrack niet afspelen', audio.error);
-    }
+
+  playerManager.setMediaUrlResolver(loadRequest => {
+    return (
+      pipelineObjectUrl ||
+      loadRequest.media?.contentUrl ||
+      loadRequest.media?.contentId
+    );
   });
 
   playerManager.setMessageInterceptor(
     cast.framework.messages.MessageType.LOAD,
     loadRequest => {
       const custom = loadRequest.media?.customData || {};
-      pendingStartTime = number(loadRequest.currentTime, 0);
-
-      if (!custom.audioUrl) {
-        status.textContent = 'De gekozen video bevat geen bruikbare audiobron';
-        status.style.display = 'block';
-      }
+      const videoUrl = loadRequest.media?.contentUrl || loadRequest.media?.contentId || '';
+      const audioUrl = custom.audioUrl || videoUrl;
 
       document.body.classList.remove('playing');
-      status.textContent = 'Video en audio voorbereiden…';
+      status.textContent = 'Beeld en gekozen audio voorbereiden…';
       status.style.display = 'block';
-      video.muted = Boolean(custom.audioUrl);
       applySubtitleStyle(custom.subtitleStyle || {});
-      configureAudio(custom.audioUrl || '');
       configureSubtitles(custom.subtitleUrl || '');
 
-      if (syncTimer) clearInterval(syncTimer);
-      syncTimer = setInterval(() => {
-        if (!usingAlternateAudio || video.paused) return;
-        if (audio.paused) playAudioWhenReady();
-        else hardSync();
-      }, 750);
-
+      try {
+        const combinedUrl = createCombinedMediaUrl(videoUrl, audioUrl);
+        loadRequest.media.contentUrl = combinedUrl;
+        loadRequest.media.contentType = 'video/mp4';
+      } catch (error) {
+        failCombinedPipeline(
+          'Dit Cast-apparaat kan de gekozen tracks niet samenvoegen',
+          error,
+          pipelineGeneration
+        );
+      }
       return loadRequest;
     }
   );
 
   context.addEventListener(
     cast.framework.system.EventType.SHUTDOWN,
-    () => {
-      stopAudioPipeline();
-      if (syncTimer) clearInterval(syncTimer);
-    }
+    () => stopCombinedPipeline()
   );
 
   context.start({
@@ -484,4 +491,3 @@
       cast.framework.messages.Command.STREAM_VOLUME
   });
 })();
-

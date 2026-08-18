@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LingoMix—Video Subtitle Player</title>
-  <link rel="stylesheet" href="styles.css?v=20260818-9">
+  <link rel="stylesheet" href="styles.css?v=20260818-10">
 </head>
 <body>
   <video id="media" playsinline crossorigin="anonymous"></video>
@@ -15,7 +15,7 @@
   <script type="module">
     import * as MP4Box from 'https://cdn.jsdelivr.net/npm/mp4box@2.4.1/dist/mp4box.all.mjs';
     window.MP4Box = MP4Box;
-    import('./receiver.js?v=20260818-9').catch(error => {
+    import('./receiver.js?v=20260818-10').catch(error => {
       console.error('LingoMix receiver failed to start', error);
       document.getElementById('status').textContent = 'LingoMix kon niet worden gestart';
     });
