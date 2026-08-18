@@ -7,9 +7,14 @@
   playerManager.setMediaElement(video);
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
-  const CHUNK_SIZE = 1024 * 1024;
-  const VIDEO_SAMPLES_PER_SEGMENT = 125;
-  const AUDIO_SAMPLES_PER_SEGMENT = 240;
+  // Keep fragments and buffered media deliberately small. Some older Cast
+  // receivers have much less memory than Google TV devices.
+  const CHUNK_SIZE = 256 * 1024;
+  const VIDEO_SAMPLES_PER_SEGMENT = 25;
+  const AUDIO_SAMPLES_PER_SEGMENT = 48;
+  const MAX_QUEUED_SEGMENTS = 4;
+  const MAX_BUFFER_AHEAD_SECONDS = 24;
+  const KEEP_BUFFER_BEHIND_SECONDS = 8;
 
   let trackElement = null;
   let subtitleCues = [];
@@ -90,15 +95,15 @@
       .replace(/\r/g, '')
       .split(/\n{2,}/);
 
-    return blocks.flatMap(block => {
+    return blocks.reduce((cues, block) => {
       const lines = block.split('\n').filter(Boolean);
       const timingIndex = lines.findIndex(line => line.includes('-->'));
-      if (timingIndex < 0 || /^NOTE(?:\s|$)/.test(lines[0] || '')) return [];
+      if (timingIndex < 0 || /^NOTE(?:\s|$)/.test(lines[0] || '')) return cues;
 
       const timing = lines[timingIndex].split('-->');
       const start = parseTimestamp(timing[0]);
       const end = parseTimestamp((timing[1] || '').trim().split(/\s+/)[0]);
-      if (!Number.isFinite(start) || !Number.isFinite(end)) return [];
+      if (!Number.isFinite(start) || !Number.isFinite(end)) return cues;
 
       const text = lines
         .slice(timingIndex + 1)
@@ -109,8 +114,9 @@
         .replace(/&lt;/g, '<')
         .replace(/&gt;/g, '>');
 
-      return text ? [{ start, end, text }] : [];
-    });
+      if (text) cues.push({ start, end, text });
+      return cues;
+    }, []);
   }
 
   function updateSubtitleFromTime() {
@@ -138,11 +144,11 @@
 
   function stopCombinedPipeline() {
     pipelineGeneration += 1;
-    pipelineAbortController?.abort();
+    if (pipelineAbortController) pipelineAbortController.abort();
     pipelineAbortController = null;
     pipelineTracks.forEach(state => {
       try {
-        state.file?.stop();
+        if (state.file) state.file.stop();
       } catch (error) {
         console.warn('Could not stop MP4 parser', error);
       }
@@ -161,7 +167,7 @@
     document.body.classList.remove('playing');
     status.textContent = message;
     status.style.display = 'block';
-    pipelineAbortController?.abort();
+    if (pipelineAbortController) pipelineAbortController.abort();
   }
 
   function parseContentRange(value) {
@@ -175,8 +181,8 @@
 
   function chooseTrack(info, kind) {
     const candidates = kind === 'video'
-      ? (info.videoTracks || info.tracks?.filter(track => track.video))
-      : (info.audioTracks || info.tracks?.filter(track => track.audio));
+      ? (info.videoTracks || ((info.tracks || []).filter(track => track.video)))
+      : (info.audioTracks || ((info.tracks || []).filter(track => track.audio)));
 
     return (candidates || [])
       .filter(track => {
@@ -185,27 +191,32 @@
       })
       .sort((left, right) => {
         if (kind !== 'video') return 0;
-        const leftSize = (left.video?.width || 0) * (left.video?.height || 0);
-        const rightSize = (right.video?.width || 0) * (right.video?.height || 0);
+        const leftVideo = left.video || {};
+        const rightVideo = right.video || {};
+        const leftSize = (leftVideo.width || 0) * (leftVideo.height || 0);
+        const rightSize = (rightVideo.width || 0) * (rightVideo.height || 0);
         return rightSize - leftSize;
       })[0] || null;
   }
 
   async function fetchTrackChunk(state, generation) {
     const requestedStart = state.nextStart;
-    const response = await fetch(state.url, {
+    const requestOptions = {
       mode: 'cors',
       cache: 'no-store',
-      headers: { Range: 'bytes=' + requestedStart + '-' + (requestedStart + CHUNK_SIZE - 1) },
-      signal: pipelineAbortController.signal
-    });
+      headers: { Range: 'bytes=' + requestedStart + '-' + (requestedStart + CHUNK_SIZE - 1) }
+    };
+    if (pipelineAbortController) requestOptions.signal = pipelineAbortController.signal;
+    const response = await fetch(state.url, requestOptions);
     if (!response.ok) throw new Error(state.kind + ' HTTP ' + response.status);
     if (response.status === 200 && requestedStart !== 0) {
       throw new Error(state.kind + ' source stopped supporting byte ranges');
     }
 
     const contentRange = parseContentRange(response.headers.get('Content-Range'));
-    const responseStart = contentRange?.start ?? 0;
+    const responseStart = contentRange && contentRange.start !== null
+      ? contentRange.start
+      : 0;
     const buffer = await response.arrayBuffer();
     if (generation !== pipelineGeneration) return;
     if (!buffer.byteLength) throw new Error('Empty ' + state.kind + ' response');
@@ -213,9 +224,9 @@
 
     const suggestedNext = state.file.appendBuffer(buffer);
     const responseEnd = responseStart + buffer.byteLength - 1;
-    state.totalLength =
-      contentRange?.total ??
-      (response.status === 200 ? buffer.byteLength : state.totalLength);
+    state.totalLength = contentRange && contentRange.total !== null
+      ? contentRange.total
+      : (response.status === 200 ? buffer.byteLength : state.totalLength);
     state.eof =
       response.status === 200 ||
       (state.totalLength !== null && responseEnd + 1 >= state.totalLength) ||
@@ -237,6 +248,8 @@
       initBuffer: null,
       sourceBuffer: null,
       queue: [],
+      pendingSampleNumber: null,
+      isTrimming: false,
       nextStart: 0,
       totalLength: null,
       eof: false,
@@ -267,7 +280,7 @@
         const initializations = state.file.initializeSegmentation('per-track');
         const initialization =
           initializations.find(item => item.id === track.id) || initializations[0];
-        if (!initialization?.buffer) {
+        if (!initialization || !initialization.buffer) {
           throw new Error('No ' + kind + ' initialization segment was created');
         }
         state.initBuffer = initialization.buffer;
@@ -294,7 +307,8 @@
     if (
       generation !== pipelineGeneration ||
       pipelineFailed ||
-      pipelineMediaSource?.readyState !== 'open' ||
+      !pipelineMediaSource ||
+      pipelineMediaSource.readyState !== 'open' ||
       !pipelineTracks.length
     ) {
       return;
@@ -313,6 +327,56 @@
     }
   }
 
+  const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+  function bufferedAheadSeconds(state) {
+    const sourceBuffer = state.sourceBuffer;
+    if (!sourceBuffer || !sourceBuffer.buffered || !sourceBuffer.buffered.length) return 0;
+    const now = Math.max(0, video.currentTime || 0);
+    for (let index = 0; index < sourceBuffer.buffered.length; index += 1) {
+      const start = sourceBuffer.buffered.start(index);
+      const end = sourceBuffer.buffered.end(index);
+      if (now >= start - 0.25 && now <= end) return Math.max(0, end - now);
+      if (now < start) return Math.max(0, end - now);
+    }
+    return 0;
+  }
+
+  function trimOldBuffer(state) {
+    const sourceBuffer = state.sourceBuffer;
+    if (
+      !sourceBuffer ||
+      sourceBuffer.updating ||
+      state.isTrimming ||
+      !sourceBuffer.buffered ||
+      !sourceBuffer.buffered.length
+    ) {
+      return false;
+    }
+    const removeBefore = Math.max(0, (video.currentTime || 0) - KEEP_BUFFER_BEHIND_SECONDS);
+    const firstStart = sourceBuffer.buffered.start(0);
+    if (removeBefore <= firstStart + 0.5) return false;
+    try {
+      state.isTrimming = true;
+      sourceBuffer.remove(firstStart, removeBefore);
+      return true;
+    } catch (error) {
+      state.isTrimming = false;
+      console.warn('Could not trim old ' + state.kind + ' buffer', error);
+      return false;
+    }
+  }
+
+  async function waitForDownloadCapacity(state, generation) {
+    while (generation === pipelineGeneration && !pipelineFailed) {
+      trimOldBuffer(state);
+      const hasQueueRoom = state.queue.length < MAX_QUEUED_SEGMENTS;
+      const hasBufferRoom = bufferedAheadSeconds(state) < MAX_BUFFER_AHEAD_SECONDS;
+      if (hasQueueRoom && hasBufferRoom && !state.isTrimming) return;
+      await wait(150);
+    }
+  }
+
   function pumpTrackQueue(state, generation) {
     if (
       generation !== pipelineGeneration ||
@@ -322,13 +386,14 @@
     ) {
       return;
     }
+    if (trimOldBuffer(state)) return;
     if (!state.queue.length) {
       maybeEndCombinedStream(generation);
       return;
     }
 
     const item = state.queue.shift();
-    state.sourceBuffer.__sampleNumber = item.sampleNumber;
+    state.pendingSampleNumber = item.sampleNumber;
     try {
       state.sourceBuffer.appendBuffer(item.buffer);
     } catch (error) {
@@ -356,7 +421,13 @@
       );
     });
     state.sourceBuffer.addEventListener('updateend', () => {
-      const sampleNumber = state.sourceBuffer?.__sampleNumber;
+      if (state.isTrimming) {
+        state.isTrimming = false;
+        pumpTrackQueue(state, generation);
+        return;
+      }
+      const sampleNumber = state.pendingSampleNumber;
+      state.pendingSampleNumber = null;
       if (sampleNumber && state.track) {
         state.file.releaseUsedSamples(state.track.id, sampleNumber);
       }
@@ -377,6 +448,8 @@
       !pipelineFailed &&
       !state.eof
     ) {
+      await waitForDownloadCapacity(state, generation);
+      if (generation !== pipelineGeneration || pipelineFailed) return;
       await fetchTrackChunk(state, generation);
     }
     if (generation !== pipelineGeneration || pipelineFailed) return;
@@ -387,7 +460,9 @@
 
   async function startCombinedPipeline(videoUrl, audioUrl, generation) {
     try {
-      pipelineAbortController = new AbortController();
+      pipelineAbortController = typeof AbortController !== 'undefined'
+        ? new AbortController()
+        : null;
       const tracks = await Promise.all([
         prepareTrack(videoUrl, 'video', generation),
         prepareTrack(audioUrl, 'audio', generation)
@@ -401,7 +476,7 @@
 
       await Promise.all(tracks.map(state => finishTrackDownload(state, generation)));
     } catch (error) {
-      if (error?.name !== 'AbortError') {
+      if (!error || error.name !== 'AbortError') {
         failCombinedPipeline(
           'Beeld en gekozen audio konden niet samen worden gestart',
           error,
@@ -434,7 +509,7 @@
   video.addEventListener('seeked', updateSubtitleFromTime);
   video.addEventListener('error', () => {
     if (!pipelineObjectUrl || video.currentSrc !== pipelineObjectUrl) return;
-    const code = video.error?.code || 0;
+    const code = video.error && video.error.code ? video.error.code : 0;
     failCombinedPipeline(
       'De gecombineerde videostream kon niet worden afgespeeld (code ' + code + ')',
       video.error,
@@ -445,20 +520,21 @@
   playerManager.setMediaUrlResolver(loadRequest => {
     return (
       pipelineObjectUrl ||
-      loadRequest.media?.contentUrl ||
-      loadRequest.media?.contentId
+      (loadRequest.media && loadRequest.media.contentUrl) ||
+      (loadRequest.media && loadRequest.media.contentId)
     );
   });
 
   playerManager.setMessageInterceptor(
     cast.framework.messages.MessageType.LOAD,
     loadRequest => {
-      const custom = loadRequest.media?.customData || {};
-      const videoUrl = loadRequest.media?.contentUrl || loadRequest.media?.contentId || '';
+      const media = loadRequest.media || {};
+      const custom = media.customData || {};
+      const videoUrl = media.contentUrl || media.contentId || '';
       const audioUrl = custom.audioUrl || videoUrl;
 
       document.body.classList.remove('playing');
-      status.textContent = 'Beeld en gekozen audio voorbereiden…';
+      status.textContent = 'v11 · beeld en gekozen audio voorbereiden…';
       status.style.display = 'block';
       applySubtitleStyle(custom.subtitleStyle || {});
       configureSubtitles(custom.subtitleUrl || '');
