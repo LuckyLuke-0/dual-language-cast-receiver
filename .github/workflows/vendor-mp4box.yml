@@ -15,6 +15,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download pinned MP4Box build and license
         run: |
@@ -28,7 +30,7 @@ jobs:
           test -s vendor/mp4box.all.min.js
           grep -q "MP4Box" vendor/mp4box.all.min.js
 
-      - name: Commit vendored files
+      - name: Commit vendored files safely
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
@@ -37,5 +39,20 @@ jobs:
             echo "Vendored MP4Box is already current."
             exit 0
           fi
+
+          # Save only the generated vendor files as a patch, refresh from the latest
+          # remote main, then re-apply the patch. This avoids non-fast-forward failures
+          # when another workflow or commit updates main while this job is running.
+          git diff --cached --binary > /tmp/vendor.patch
+          git reset --hard HEAD
+          git fetch origin main
+          git checkout -B main origin/main
+          git apply --index /tmp/vendor.patch
+
+          if git diff --cached --quiet; then
+            echo "Vendored MP4Box became current after refreshing main."
+            exit 0
+          fi
+
           git commit -m "Vendor MP4Box 2.3.0 for receiver"
-          git push
+          git push origin HEAD:main
