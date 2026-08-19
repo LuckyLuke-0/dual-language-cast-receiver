@@ -18,19 +18,65 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Build legacy MP4Box 0.3.16 from source
+      - name: Build legacy MP4Box directly from official sources
         run: |
           set -euxo pipefail
           rm -rf /tmp/mp4boxjs
           git clone --depth 1 --branch v0.3.16 https://github.com/gpac/mp4box.js.git /tmp/mp4boxjs
           cd /tmp/mp4boxjs
-          npm install
-          npm run build
+          mkdir -p dist
+
+          # v0.3.16's npm devDependencies include PhantomJS/Karma from 2015,
+          # which cannot install on current GitHub runners. Grunt's `all` task
+          # is only an ordered concatenation followed by minification, so build
+          # the browser bundle directly from the exact official source order.
+          python3 - <<'PY'
+          from pathlib import Path
+          import glob
+
+          root = Path('/tmp/mp4boxjs')
+          patterns = [
+              'src/log.js',
+              'src/stream.js',
+              'src/DataStream.js',
+              'src/DataStream-write.js',
+              'src/DataStream-map.js',
+              'src/buffer.js',
+              'src/descriptor.js',
+              'src/box.js',
+              'src/box-codecs.js',
+              'src/box-parse.js',
+              'src/parsing/**/*.js',
+              'src/box-write.js',
+              'src/writing/**/*.js',
+              'src/box-unpack.js',
+              'src/text-mp4.js',
+              'src/isofile.js',
+              'src/isofile-advanced-parsing.js',
+              'src/isofile-advanced-creation.js',
+              'src/isofile-sample-processing.js',
+              'src/isofile-item-processing.js',
+              'src/isofile-write.js',
+              'src/mp4box.js',
+          ]
+          files = []
+          for pattern in patterns:
+              matches = sorted(glob.glob(str(root / pattern), recursive=True))
+              if not matches:
+                  raise SystemExit(f'No source matched {pattern}')
+              files.extend(matches)
+          out = root / 'dist' / 'mp4box.all.js'
+          with out.open('w', encoding='utf-8') as dst:
+              for filename in files:
+                  rel = Path(filename).relative_to(root)
+                  dst.write(f'// file:{rel}\n')
+                  dst.write(Path(filename).read_text(encoding='utf-8'))
+                  dst.write('\n')
+          PY
+
           cd "$GITHUB_WORKSPACE"
           mkdir -p vendor
-          LEGACY_FILE=$(find /tmp/mp4boxjs -type f \( -name 'mp4box.all.min.js' -o -name 'mp4box.all.js' \) | head -n 1)
-          test -n "$LEGACY_FILE"
-          cp "$LEGACY_FILE" vendor/mp4box.all.min.js
+          cp /tmp/mp4boxjs/dist/mp4box.all.js vendor/mp4box.all.min.js
           cp /tmp/mp4boxjs/LICENSE vendor/MP4BOX-LICENSE.txt
           test -s vendor/mp4box.all.min.js
           grep -q "MP4Box" vendor/mp4box.all.min.js
