@@ -10,35 +10,29 @@
 
   let subtitleCues = [];
   let loadGeneration = 0;
+  let pendingMse = null;
   let objectUrl = null;
-  let activeAbortControllers = [];
+  let aborters = [];
 
   function showStatus(message) {
     document.body.classList.remove('playing');
     status.textContent = message;
     status.style.display = 'block';
   }
-
   function hideStatus() {
     document.body.classList.add('playing');
     status.style.display = 'none';
   }
-
   function number(value, fallback) {
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : fallback;
   }
-
   function colourWithAlpha(colour, alpha) {
     if (typeof colour !== 'string') return `rgba(0,0,0,${alpha})`;
     const hex = colour.trim().replace('#', '');
     if (!/^[0-9a-f]{6}$/i.test(hex)) return colour;
-    const r = parseInt(hex.slice(0, 2), 16);
-    const g = parseInt(hex.slice(2, 4), 16);
-    const b = parseInt(hex.slice(4, 6), 16);
-    return `rgba(${r},${g},${b},${alpha})`;
+    return `rgba(${parseInt(hex.slice(0,2),16)},${parseInt(hex.slice(2,4),16)},${parseInt(hex.slice(4,6),16)},${alpha})`;
   }
-
   function applySubtitleStyle(style = {}) {
     const size = Math.max(40, Math.min(80, number(style.textSizePercent, 60)));
     const bottom = Math.max(0, Math.min(30, number(style.bottomMarginPercent, 4)));
@@ -55,15 +49,13 @@
     subtitle.style.setProperty('--subtitle-padding-x', backgroundOpacity > 0 ? '0.28em' : '0');
     subtitle.style.setProperty('--subtitle-shadow', outline ? '-0.055em -0.055em 0 #000, 0.055em -0.055em 0 #000, -0.055em 0.055em 0 #000, 0.055em 0.055em 0 #000, 0 0 0.08em #000' : 'none');
   }
-
   function parseTimestamp(value) {
     const parts = value.trim().replace(',', '.').split(':').map(Number);
-    if (parts.some(part => !Number.isFinite(part))) return NaN;
+    if (parts.some(p => !Number.isFinite(p))) return NaN;
     if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
     if (parts.length === 2) return parts[0] * 60 + parts[1];
     return NaN;
   }
-
   function parseVtt(vtt) {
     return vtt.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n{2,}/).reduce((cues, block) => {
       const lines = block.split('\n').filter(Boolean);
@@ -78,21 +70,17 @@
       return cues;
     }, []);
   }
-
   function clearSubtitles() {
     subtitleCues = [];
     subtitle.textContent = '';
     subtitle.style.display = 'none';
   }
-
   function updateSubtitleFromTime() {
-    if (!subtitleCues.length) return;
     const now = video.currentTime;
     const active = subtitleCues.filter(cue => now >= cue.start && now < cue.end);
     subtitle.textContent = active.map(cue => cue.text).join('\n');
     subtitle.style.display = active.length ? 'block' : 'none';
   }
-
   async function configureSubtitles(url, generation) {
     clearSubtitles();
     if (!url) return;
@@ -107,148 +95,117 @@
       console.error('Subtitle loading failed', error);
     }
   }
-
   function resetMse() {
-    activeAbortControllers.forEach(controller => {
-      try { controller.abort(); } catch (_) {}
-    });
-    activeAbortControllers = [];
-    if (objectUrl) {
-      try { URL.revokeObjectURL(objectUrl); } catch (_) {}
-      objectUrl = null;
-    }
+    aborters.forEach(a => { try { a.abort(); } catch (_) {} });
+    aborters = [];
+    if (objectUrl) { try { URL.revokeObjectURL(objectUrl); } catch (_) {} objectUrl = null; }
   }
-
-  function sourceBufferQueue(sourceBuffer) {
+  function waitSourceOpen(ms) {
+    if (ms.readyState === 'open') return Promise.resolve();
+    return new Promise((resolve, reject) => {
+      const ok = () => { cleanup(); resolve(); };
+      const fail = () => { cleanup(); reject(new Error('MediaSource kon niet openen')); };
+      const cleanup = () => { ms.removeEventListener('sourceopen', ok); ms.removeEventListener('sourceclose', fail); };
+      ms.addEventListener('sourceopen', ok, { once: true });
+      ms.addEventListener('sourceclose', fail, { once: true });
+    });
+  }
+  function makeQueue(sb) {
     const queue = [];
     let failed = false;
     const pump = () => {
-      if (failed || sourceBuffer.updating || queue.length === 0) return;
-      const next = queue.shift();
-      try { sourceBuffer.appendBuffer(next); }
-      catch (error) {
-        failed = true;
-        console.error('SourceBuffer append failed', error);
-        showStatus(`MSE append fout: ${error && error.message ? error.message : error}`);
-      }
+      if (failed || sb.updating || !queue.length) return;
+      try { sb.appendBuffer(queue.shift()); } catch (e) { failed = true; showStatus(`MSE append fout: ${e.message || e}`); }
     };
-    sourceBuffer.addEventListener('updateend', pump);
-    sourceBuffer.addEventListener('error', () => {
-      failed = true;
-      showStatus('MSE SourceBuffer fout');
-    });
-    return data => {
-      if (!failed && data && data.byteLength) {
-        queue.push(data);
-        pump();
-      }
-    };
+    sb.addEventListener('updateend', pump);
+    sb.addEventListener('error', () => { failed = true; showStatus('MSE SourceBuffer fout'); });
+    return data => { if (!failed && data && data.byteLength) { queue.push(data); pump(); } };
   }
+  function startTrackStream(url, kind, mediaSource, generation) {
+    return new Promise((resolve, reject) => {
+      if (!window.MP4Box) return reject(new Error('MP4Box niet geladen'));
+      const controller = new AbortController();
+      aborters.push(controller);
+      const mp4box = MP4Box.createFile();
+      let selectedTrackId = null;
+      let append = null;
+      let fileOffset = 0;
+      let resolved = false;
 
-  async function streamMp4Track(url, wantedKind, mediaSource, generation, onReady) {
-    if (!window.MP4Box) throw new Error('MP4Box kon niet worden geladen');
-    const controller = new AbortController();
-    activeAbortControllers.push(controller);
-    const mp4box = MP4Box.createFile();
-    let appendSegment = null;
-    let selectedTrackId = null;
-    let fileOffset = 0;
-    let readyResolved = false;
-
-    const readyPromise = new Promise((resolve, reject) => {
-      mp4box.onError = error => reject(new Error(`MP4Box ${wantedKind}: ${error}`));
+      mp4box.onError = err => { if (!resolved) reject(new Error(`MP4Box ${kind}: ${err}`)); };
       mp4box.onReady = info => {
         try {
           if (generation !== loadGeneration) return;
-          const tracks = wantedKind === 'video' ? info.videoTracks : info.audioTracks;
+          const tracks = kind === 'video' ? info.videoTracks : info.audioTracks;
           const track = tracks && tracks[0];
-          if (!track) throw new Error(`Geen ${wantedKind}track gevonden`);
+          if (!track) throw new Error(`Geen ${kind}track gevonden`);
           selectedTrackId = track.id;
-          const mime = `${wantedKind}/mp4; codecs=\"${track.codec}\"`;
-          if (!MediaSource.isTypeSupported(mime)) throw new Error(`Niet ondersteund op dit Cast-apparaat: ${mime}`);
-          const sourceBuffer = mediaSource.addSourceBuffer(mime);
-          appendSegment = sourceBufferQueue(sourceBuffer);
-          mp4box.setSegmentOptions(track.id, null, { nbSamples: 1000, rapAlignement: true });
-          const initSegments = mp4box.initializeSegmentation();
-          initSegments.filter(item => item.id === track.id).forEach(item => appendSegment(item.buffer));
+          const mime = `${kind}/mp4; codecs=\"${track.codec}\"`;
+          if (!MediaSource.isTypeSupported(mime)) throw new Error(`Niet ondersteund: ${mime}`);
+          const sb = mediaSource.addSourceBuffer(mime);
+          append = makeQueue(sb);
+          mp4box.setSegmentOptions(track.id, null, { nbSamples: 150, rapAlignement: true });
+          mp4box.initializeSegmentation().filter(s => s.id === track.id).forEach(s => append(s.buffer));
           mp4box.start();
-          readyResolved = true;
-          onReady(track);
+          resolved = true;
           resolve(track);
-        } catch (error) {
-          reject(error);
-        }
+        } catch (e) { reject(e); }
       };
       mp4box.onSegment = (id, user, buffer) => {
-        if (generation !== loadGeneration || id !== selectedTrackId || !appendSegment) return;
-        appendSegment(buffer);
+        if (generation === loadGeneration && id === selectedTrackId && append) append(buffer);
       };
-    });
 
-    const response = await fetch(url, {
-      mode: 'cors',
-      cache: 'no-store',
-      signal: controller.signal,
-      headers: { 'Accept': 'video/mp4,*/*' }
-    });
-    if (!response.ok) throw new Error(`${wantedKind} HTTP ${response.status}`);
-    if (!response.body || !response.body.getReader) throw new Error(`${wantedKind}: streaming fetch niet beschikbaar`);
-
-    const reader = response.body.getReader();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (generation !== loadGeneration) return;
-      const copy = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
-      copy.fileStart = fileOffset;
-      fileOffset += copy.byteLength;
-      mp4box.appendBuffer(copy);
-    }
-    mp4box.flush();
-    if (!readyResolved) await readyPromise;
-    return readyPromise;
-  }
-
-  function waitForSourceOpen(mediaSource) {
-    if (mediaSource.readyState === 'open') return Promise.resolve();
-    return new Promise((resolve, reject) => {
-      const onOpen = () => { cleanup(); resolve(); };
-      const onError = () => { cleanup(); reject(new Error('MediaSource kon niet openen')); };
-      const cleanup = () => {
-        mediaSource.removeEventListener('sourceopen', onOpen);
-        mediaSource.removeEventListener('sourceclose', onError);
-      };
-      mediaSource.addEventListener('sourceopen', onOpen, { once: true });
-      mediaSource.addEventListener('sourceclose', onError, { once: true });
+      (async () => {
+        try {
+          const response = await fetch(url, { mode: 'cors', cache: 'no-store', signal: controller.signal });
+          if (!response.ok) throw new Error(`${kind} HTTP ${response.status}`);
+          if (!response.body || !response.body.getReader) throw new Error(`${kind}: streaming fetch niet beschikbaar`);
+          const reader = response.body.getReader();
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done || generation !== loadGeneration) break;
+            const buf = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+            buf.fileStart = fileOffset;
+            fileOffset += buf.byteLength;
+            mp4box.appendBuffer(buf);
+          }
+          mp4box.flush();
+        } catch (e) {
+          if (e.name !== 'AbortError') {
+            console.error('MSE stream error', kind, e);
+            if (!resolved) reject(e); else showStatus(`MSE ${kind} stream fout: ${e.message || e}`);
+          }
+        }
+      })();
     });
   }
-
-  async function prepareMse(videoUrl, audioUrl, generation) {
-    resetMse();
-    const mediaSource = new MediaSource();
-    objectUrl = URL.createObjectURL(mediaSource);
-    await waitForSourceOpen(mediaSource);
+  async function activateMse(pending) {
+    const generation = pending.generation;
     if (generation !== loadGeneration) return;
-
-    let videoTrack = null;
-    let audioTrack = null;
-    showStatus('Muxeo MSE: JW video + gekozen audio analyseren…');
-
-    await Promise.all([
-      streamMp4Track(videoUrl, 'video', mediaSource, generation, track => { videoTrack = track; }),
-      streamMp4Track(audioUrl, 'audio', mediaSource, generation, track => { audioTrack = track; })
+    resetMse();
+    const ms = new MediaSource();
+    objectUrl = URL.createObjectURL(ms);
+    showStatus('Muxeo MSE v16: videotrack + gekozen audio voorbereiden…');
+    video.pause();
+    video.src = objectUrl;
+    await waitSourceOpen(ms);
+    const [vTrack, aTrack] = await Promise.all([
+      startTrackStream(pending.videoUrl, 'video', ms, generation),
+      startTrackStream(pending.audioUrl, 'audio', ms, generation)
     ]);
-
-    if (videoTrack && audioTrack && mediaSource.readyState === 'open') {
-      const duration = Math.max(
-        number(videoTrack.duration, 0) / Math.max(1, number(videoTrack.timescale, 1)),
-        number(audioTrack.duration, 0) / Math.max(1, number(audioTrack.timescale, 1))
-      );
-      if (Number.isFinite(duration) && duration > 0) {
-        try { mediaSource.duration = duration; } catch (_) {}
-      }
+    if (generation !== loadGeneration) return;
+    const duration = Math.max(
+      number(vTrack.duration, 0) / Math.max(1, number(vTrack.timescale, 1)),
+      number(aTrack.duration, 0) / Math.max(1, number(aTrack.timescale, 1))
+    );
+    if (Number.isFinite(duration) && duration > 0 && ms.readyState === 'open') {
+      try { ms.duration = duration; } catch (_) {}
     }
-    showStatus('Muxeo MSE: tracks klaar — afspelen…');
+    if (pending.currentTime > 0) {
+      try { video.currentTime = pending.currentTime; } catch (_) {}
+    }
+    showStatus('Muxeo MSE v16: stream gestart…');
+    try { await video.play(); } catch (e) { showStatus(`MSE afspelen mislukt: ${e.message || e}`); }
   }
 
   playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, request => {
@@ -256,56 +213,40 @@
     const generation = loadGeneration;
     const media = request && request.media ? request.media : {};
     const customData = media.customData || {};
-    const mseDemux = customData.mseDemux === true;
-
     applySubtitleStyle(customData.subtitleStyle || {});
     configureSubtitles(customData.subtitleUrl || '', generation);
 
-    if (!mseDemux) return request;
-
-    const pictureUrl = customData.videoUrl || media.contentId || media.contentUrl || '';
-    const audioUrl = customData.audioUrl || '';
-    if (!pictureUrl || !audioUrl) throw new Error('MSE_DEMUX_URL_MISSING');
-    if (!window.MediaSource || !window.MP4Box) throw new Error('MSE_OR_MP4BOX_UNAVAILABLE');
-
-    const mediaSource = new MediaSource();
-    resetMse();
-    objectUrl = URL.createObjectURL(mediaSource);
-    showStatus('Muxeo MSE v15: één player voorbereiden…');
-
-    media.contentId = objectUrl;
-    media.contentUrl = objectUrl;
-    media.contentType = 'video/mp4';
-
-    waitForSourceOpen(mediaSource)
-      .then(() => {
-        if (generation !== loadGeneration) return;
-        let videoTrack = null;
-        let audioTrack = null;
-        showStatus('Muxeo MSE v15: JW video + gekozen audio streamen…');
-        return Promise.all([
-          streamMp4Track(pictureUrl, 'video', mediaSource, generation, track => { videoTrack = track; }),
-          streamMp4Track(audioUrl, 'audio', mediaSource, generation, track => { audioTrack = track; })
-        ]).then(() => {
-          if (generation !== loadGeneration) return;
-          if (videoTrack && audioTrack && mediaSource.readyState === 'open') {
-            const duration = Math.max(
-              number(videoTrack.duration, 0) / Math.max(1, number(videoTrack.timescale, 1)),
-              number(audioTrack.duration, 0) / Math.max(1, number(audioTrack.timescale, 1))
-            );
-            if (Number.isFinite(duration) && duration > 0) {
-              try { mediaSource.duration = duration; } catch (_) {}
-            }
-          }
-          showStatus('Muxeo MSE v15: afspelen…');
-        });
-      })
-      .catch(error => {
-        console.error('Muxeo MSE demux failed', error);
-        showStatus(`Muxeo MSE fout\n${error && error.message ? error.message : error}`);
-      });
-
+    if (customData.mseDemux === true) {
+      const pictureUrl = customData.videoUrl || media.contentUrl || media.contentId || '';
+      const audioUrl = customData.audioUrl || '';
+      if (!pictureUrl || !audioUrl) throw new Error('MSE_DEMUX_URL_MISSING');
+      if (!window.MediaSource || !window.MP4Box) throw new Error('MSE_OR_MP4BOX_UNAVAILABLE');
+      pendingMse = {
+        generation,
+        videoUrl: pictureUrl,
+        audioUrl,
+        currentTime: number(request.currentTime, 0)
+      };
+      showStatus('Muxeo MSE v16: Cast LOAD accepteren…');
+      // Belangrijk: laat CAF eerst de gewone publieke JW-video accepteren.
+      // Een blob:-URL in LOAD werd door klassieke Chromecast geweigerd.
+      media.contentUrl = pictureUrl;
+      media.contentId = pictureUrl;
+      media.contentType = 'video/mp4';
+    } else {
+      pendingMse = null;
+    }
     return request;
+  });
+
+  playerManager.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, () => {
+    const pending = pendingMse;
+    if (!pending || pending.generation !== loadGeneration) return;
+    pendingMse = null;
+    activateMse(pending).catch(error => {
+      console.error('Muxeo MSE activation failed', error);
+      showStatus(`Muxeo MSE fout\n${error && error.message ? error.message : error}`);
+    });
   });
 
   video.addEventListener('playing', hideStatus);
@@ -313,11 +254,12 @@
   video.addEventListener('seeked', updateSubtitleFromTime);
   video.addEventListener('error', () => {
     const code = video.error ? video.error.code : 'onbekend';
-    showStatus(`De MSE-video kon niet worden afgespeeld (fout ${code})`);
+    showStatus(`De video kon niet worden afgespeeld (fout ${code})`);
   });
 
   context.addEventListener(cast.framework.system.EventType.SHUTDOWN, () => {
     loadGeneration += 1;
+    pendingMse = null;
     resetMse();
     clearSubtitles();
   });
