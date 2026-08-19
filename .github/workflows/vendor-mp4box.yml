@@ -18,15 +18,20 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download legacy MP4Box build and license
+      - name: Build legacy MP4Box 0.3.16 from source
         run: |
+          set -euxo pipefail
+          rm -rf /tmp/mp4boxjs
+          git clone --depth 1 --branch v0.3.16 https://github.com/gpac/mp4box.js.git /tmp/mp4boxjs
+          cd /tmp/mp4boxjs
+          npm install
+          npm run build
+          cd "$GITHUB_WORKSPACE"
           mkdir -p vendor
-          curl --fail --location --retry 3 \
-            https://cdn.jsdelivr.net/npm/mp4box-vg@0.3.16-vg2/dist/mp4box.all.min.js \
-            --output vendor/mp4box.all.min.js
-          curl --fail --location --retry 3 \
-            https://raw.githubusercontent.com/gpac/mp4box.js/v0.3.16/LICENSE \
-            --output vendor/MP4BOX-LICENSE.txt
+          LEGACY_FILE=$(find /tmp/mp4boxjs -type f \( -name 'mp4box.all.min.js' -o -name 'mp4box.all.js' \) | head -n 1)
+          test -n "$LEGACY_FILE"
+          cp "$LEGACY_FILE" vendor/mp4box.all.min.js
+          cp /tmp/mp4boxjs/LICENSE vendor/MP4BOX-LICENSE.txt
           test -s vendor/mp4box.all.min.js
           grep -q "MP4Box" vendor/mp4box.all.min.js
 
