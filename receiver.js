@@ -4,21 +4,15 @@
   const context = cast.framework.CastReceiverContext.getInstance();
   const playerManager = context.getPlayerManager();
   const video = document.getElementById('media');
-  const audio = document.getElementById('companion-audio');
   const subtitle = document.getElementById('subtitle');
   const status = document.getElementById('status');
 
   playerManager.setMediaElement(video);
 
-  const HARD_SYNC_DRIFT_SECONDS = 0.35;
-  const SOFT_SYNC_DRIFT_SECONDS = 0.12;
-  const SYNC_INTERVAL_MS = 500;
-
   let subtitleCues = [];
-  let audioUrl = '';
-  let useCompanionAudio = false;
-  let syncTimer = null;
   let loadGeneration = 0;
+  let expectedAudioTrackId = null;
+  let expectAlternateAudio = false;
 
   const number = (value, fallback) => {
     const parsed = Number(value);
@@ -52,7 +46,6 @@
     const font = String(style.fontFamily || 'Arial').toLowerCase();
     const backgroundOpacity = Math.max(0, Math.min(1, number(style.backgroundOpacity, 0)));
     const outline = style.blackOutline !== false;
-
     subtitle.style.setProperty('--subtitle-size', String(size));
     subtitle.style.setProperty('--subtitle-bottom', `${bottom}%`);
     subtitle.style.setProperty('--subtitle-color', style.textColor || '#ffffff');
@@ -79,8 +72,7 @@
   }
 
   function parseVtt(vtt) {
-    const blocks = vtt.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n{2,}/);
-    return blocks.reduce((cues, block) => {
+    return vtt.replace(/^\uFEFF/, '').replace(/\r/g, '').split(/\n{2,}/).reduce((cues, block) => {
       const lines = block.split('\n').filter(Boolean);
       const timingIndex = lines.findIndex(line => line.includes('-->'));
       if (timingIndex < 0 || /^NOTE(?:\s|$)/.test(lines[0] || '')) return cues;
@@ -117,151 +109,54 @@
     }
   }
 
-  function stopSyncTimer() {
-    if (syncTimer !== null) {
-      clearInterval(syncTimer);
-      syncTimer = null;
-    }
-  }
-
-  function resetCompanionAudio() {
-    stopSyncTimer();
-    useCompanionAudio = false;
-    audioUrl = '';
-    try { audio.pause(); } catch (_) {}
-    audio.removeAttribute('src');
-    audio.load();
-    video.muted = false;
-  }
-
-  function safeSetAudioTime(target) {
-    if (!useCompanionAudio || !Number.isFinite(target) || audio.readyState < 1) return;
-    const duration = Number.isFinite(audio.duration) ? audio.duration : Number.POSITIVE_INFINITY;
-    try { audio.currentTime = Math.max(0, Math.min(target, duration)); } catch (error) { console.warn(error); }
-  }
-
-  function synchronizeAudio(force = false) {
-    if (!useCompanionAudio || audio.readyState < 1 || video.readyState < 1) return;
-    const drift = audio.currentTime - video.currentTime;
-    if (force || Math.abs(drift) > HARD_SYNC_DRIFT_SECONDS) {
-      safeSetAudioTime(video.currentTime);
-      audio.playbackRate = video.playbackRate || 1;
-      return;
-    }
-    if (Math.abs(drift) > SOFT_SYNC_DRIFT_SECONDS) {
-      const correction = drift > 0 ? -0.02 : 0.02;
-      audio.playbackRate = Math.max(0.5, Math.min(2, (video.playbackRate || 1) + correction));
-    } else {
-      audio.playbackRate = video.playbackRate || 1;
-    }
-  }
-
-  function startSyncTimer() {
-    stopSyncTimer();
-    syncTimer = setInterval(() => synchronizeAudio(false), SYNC_INTERVAL_MS);
-  }
-
-  async function playCompanionAudio() {
-    if (!useCompanionAudio) return;
-    synchronizeAudio(true);
-    try {
-      await audio.play();
-      startSyncTimer();
-    } catch (error) {
-      console.error('Companion audio playback failed', error);
-      showStatus('De gekozen audio kon niet worden afgespeeld');
-    }
-  }
-
-  function configureCompanionAudio(nextAudioUrl, videoUrl) {
-    resetCompanionAudio();
-    const chosen = String(nextAudioUrl || '').trim();
-    const picture = String(videoUrl || '').trim();
-    if (!chosen || chosen === picture) return;
-    audioUrl = chosen;
-    useCompanionAudio = true;
-    video.muted = true;
-    audio.preload = 'auto';
-    audio.crossOrigin = 'anonymous';
-    audio.src = audioUrl;
-    audio.load();
-  }
-
-  function describeUrl(url) {
-    try {
-      const parsed = new URL(url);
-      return `${parsed.protocol}//${parsed.hostname}:${parsed.port || '(default)'}`;
-    } catch (_) {
-      return String(url || 'ongeldig adres');
-    }
-  }
-
-  async function probeSinglePipeline(url) {
-    showStatus(`Receiver v13: lokale media testen…\n${describeUrl(url)}`);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 8000);
-    try {
-      const response = await fetch(url, {
-        method: 'HEAD',
-        mode: 'cors',
-        cache: 'no-store',
-        signal: controller.signal
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status} ${response.statusText || ''}`.trim());
-      const length = response.headers.get('content-length') || '?';
-      const type = response.headers.get('content-type') || '?';
-      showStatus(`Receiver v13: telefoon bereikbaar ✓\nHEAD ${response.status} · ${type} · ${length} bytes\nMedia wordt gestart…`);
-      return true;
-    } catch (error) {
-      const reason = error && error.name === 'AbortError' ? 'timeout na 8 s' : `${error && error.name ? error.name : 'Error'}: ${error && error.message ? error.message : String(error)}`;
-      showStatus(`Receiver v13: lokale media NIET bereikbaar\n${describeUrl(url)}\n${reason}`);
-      console.error('Single-pipeline local media probe failed', error, url);
-      return false;
-    } finally {
-      clearTimeout(timeout);
-    }
-  }
-
-  playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, async request => {
+  playerManager.setMessageInterceptor(cast.framework.messages.MessageType.LOAD, request => {
     loadGeneration += 1;
     const generation = loadGeneration;
     const media = request && request.media ? request.media : {};
     const customData = media.customData || {};
-    const videoUrl = media.contentId || media.contentUrl || '';
+    expectAlternateAudio = customData.nativeAlternateAudio === true;
+    expectedAudioTrackId = Number.isFinite(Number(customData.audioTrackId)) ? Number(customData.audioTrackId) : null;
 
-    showStatus('Video en gekozen audio worden gestart…');
+    showStatus(expectAlternateAudio ? 'Muxeo: video + gekozen Cast-audiotrack starten…' : 'Muxeo: video starten…');
     applySubtitleStyle(customData.subtitleStyle || {});
     configureSubtitles(customData.subtitleUrl || '', generation);
-    configureCompanionAudio(customData.audioUrl || '', videoUrl);
-
-    if (customData.singlePipeline === true && /^http:\/\//i.test(videoUrl)) {
-      const reachable = await probeSinglePipeline(videoUrl);
-      if (!reachable) {
-        throw new Error('LOCAL_MEDIA_UNREACHABLE');
-      }
-    }
     return request;
   });
 
-  video.addEventListener('loadedmetadata', () => { if (useCompanionAudio) synchronizeAudio(true); });
-  video.addEventListener('playing', () => { hideStatus(); if (useCompanionAudio) playCompanionAudio(); });
-  video.addEventListener('play', () => { if (useCompanionAudio) playCompanionAudio(); });
-  video.addEventListener('pause', () => { stopSyncTimer(); if (useCompanionAudio) audio.pause(); });
-  video.addEventListener('seeking', () => { if (!useCompanionAudio) return; audio.pause(); synchronizeAudio(true); });
-  video.addEventListener('seeked', () => { if (!useCompanionAudio) return; synchronizeAudio(true); if (!video.paused && !video.ended) playCompanionAudio(); });
-  video.addEventListener('ratechange', () => { if (useCompanionAudio) audio.playbackRate = video.playbackRate || 1; });
+  playerManager.addEventListener(cast.framework.events.EventType.PLAYER_LOAD_COMPLETE, () => {
+    if (!expectAlternateAudio) return;
+    try {
+      const manager = playerManager.getAudioTracksManager();
+      const tracks = manager.getTracks() || [];
+      if (!tracks.length) {
+        showStatus('Muxeo: Cast vond geen alternatieve audiotrack');
+        return;
+      }
+      const wanted = expectedAudioTrackId !== null
+        ? tracks.find(track => Number(track.trackId) === expectedAudioTrackId)
+        : tracks[0];
+      if (!wanted) {
+        showStatus(`Muxeo: audiotrack ${expectedAudioTrackId} werd niet gevonden`);
+        return;
+      }
+      manager.setActiveById(wanted.trackId);
+      console.log('Muxeo active audio track', wanted.trackId, wanted.trackContentId, wanted.trackContentType);
+    } catch (error) {
+      console.error('Could not activate alternate audio track', error);
+      showStatus(`Muxeo: audiotrack kon niet worden geactiveerd (${error && error.message ? error.message : error})`);
+    }
+  });
+
+  video.addEventListener('playing', hideStatus);
   video.addEventListener('timeupdate', updateSubtitleFromTime);
-  video.addEventListener('ended', () => { stopSyncTimer(); if (useCompanionAudio) audio.pause(); });
+  video.addEventListener('seeked', updateSubtitleFromTime);
   video.addEventListener('error', () => {
     const code = video.error ? video.error.code : 'onbekend';
     showStatus(`De video kon niet worden afgespeeld (fout ${code})`);
   });
-  audio.addEventListener('loadedmetadata', () => { if (!useCompanionAudio) return; synchronizeAudio(true); if (!video.paused && !video.ended) playCompanionAudio(); });
-  audio.addEventListener('error', () => { if (!useCompanionAudio) return; const code = audio.error ? audio.error.code : 'onbekend'; showStatus(`De gekozen audio kon niet worden afgespeeld (fout ${code})`); });
 
   context.addEventListener(cast.framework.system.EventType.SHUTDOWN, () => {
     loadGeneration += 1;
-    resetCompanionAudio();
     clearSubtitles();
   });
 
