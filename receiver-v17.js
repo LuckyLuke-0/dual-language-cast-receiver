@@ -111,10 +111,10 @@
     objectUrl = URL.createObjectURL(ms);
     video.pause();
     video.src = objectUrl;
-    show('Muxeo v17: MSE openen…');
+    show('Muxeo legacy MSE: openen…');
     await waitOpen(ms);
     if (gen !== generation) return;
-    show('Muxeo v17: JW video + audio demuxen…');
+    show('Muxeo legacy MSE: video + audio demuxen…');
     const [v, a] = await Promise.all([
       streamTrack(cfg.videoUrl, 'video', ms, gen),
       streamTrack(cfg.audioUrl, 'audio', ms, gen)
@@ -127,7 +127,7 @@
       try { ms.duration = duration; } catch (_) {}
     }
     if (current > 0) { try { video.currentTime = current; } catch (_) {} }
-    show('Muxeo v17: MSE afspelen…');
+    show('Muxeo legacy MSE: afspelen…');
     await video.play();
   }
 
@@ -140,16 +140,17 @@
     const picture = custom.videoUrl || media.contentUrl || media.contentId || '';
     const audio = custom.audioUrl || '';
 
-    // Never throw from LOAD. Classic Chromecast must first accept one ordinary public JW MP4.
     if (useMse && picture && audio) {
       pending = { generation, videoUrl: picture, audioUrl: audio };
       media.contentId = picture;
       media.contentUrl = picture;
       media.contentType = 'video/mp4';
-      show(`Muxeo v17 LOAD OK | MSE:${!!window.MediaSource} MP4Box:${!!window.MP4Box}`);
+      show(`Muxeo legacy MSE LOAD | MediaSource:${!!window.MediaSource} MP4Box:${!!window.MP4Box}`);
     } else {
+      // Preferred Media3 path: one already combined MP4. MP4Box is deliberately irrelevant here.
       pending = null;
-      show('Muxeo v17: gewone video laden…');
+      media.contentType = 'video/mp4';
+      show('Muxeo v20: gecombineerde MP4 laden…');
     }
     return request;
   });
@@ -161,7 +162,7 @@
     setTimeout(() => {
       startMse(cfg).catch(e => {
         console.error('MSE activation failed', e);
-        show(`Muxeo v17 MSE fout: ${e.message || e}`);
+        show(`Muxeo legacy MSE fout: ${e.message || e}`);
       });
     }, 0);
   });
